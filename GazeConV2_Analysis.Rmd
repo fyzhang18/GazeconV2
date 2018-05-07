@@ -1,0 +1,701 @@
+---
+title: "GCV2_BabyPilot"
+author: "Felicia Zhang"
+date: '2017-05-10'
+output: html_document
+---
+
+```{r}
+library(ggplot2) 
+library(zoo)
+library(reshape)
+library(plyr)
+library(dplyr)
+library(scales) 
+library(data.table)
+library(signal)
+library(matrixStats)
+library(lme4)
+library(arm)
+library(broom)
+library(tidyr)
+
+#task info: 2 conditions (AV, VA randomized)
+#3 learning trials and then omission 1/3
+raw.sample <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_preprocessed_final.rds")
+```
+
+Preparing dataframe for analysis
+```{r}
+#label learning trials 1-3, 13-15
+raw.sample$learningtrials <- 1
+raw.sample$learningtrials[raw.sample$TRIAL_INDEX > 15] <- 0
+raw.sample$learningtrials[raw.sample$TRIAL_INDEX > 3 & raw.sample$TRIAL_INDEX < 13] <- 0
+
+#label which part of the trial was baseline video
+raw.sample$video <- 0
+raw.sample$video[raw.sample$TIMECODE > 10000] <- 1
+
+#exclude baseline video portion from pupil analysis 
+poo <- subset(raw.sample, video==0)
+
+#remove sub 19
+poo.nosub19 <- subset(poo, subID !=19) 
+```
+
+Summary graphs PDR
+1. Pupil change per subject
+2. Pupil change per subject (every dot is a trial)
+```{r}
+####### 1. pupil change per subject #######
+boo <- group_by(poo, subID, TRIAL_INDEX) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+boo2 <- group_by(boo, subID) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+ggplot(boo2,aes(x=factor(subID),y=meanPUPILSs))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  ggtitle("PDR for each subject")+
+  labs(x = "Subject", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(-0.05,.3),breaks=seq(-0.05,.3,.05))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+####### 2. pupil change per trial #######
+ggplot(boo,aes(x=factor(subID),y=meanPUPIL,color=factor(subID),fill=factor(subID)))+
+  geom_point()+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  ggtitle("PDR for each trial")+
+  labs(x = "Subject", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(-0.5,1),breaks=seq(-0.5,1,.1))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  guides(color=FALSE,fill=FALSE)
+
+```
+
+Summary graphs
+1. Number of trials for each condition, per subject
+```{r}
+coo <- group_by(poo, subID, condition) %>%
+  summarise(
+    numtrials=length(unique(TRIAL_INDEX,na.rm = TRUE))
+  )
+
+ggplot(coo,aes(x=factor(subID),y=numtrials,color=factor(condition),fill=factor(condition)))+
+  geom_bar(stat="identity")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  ggtitle("")+
+  labs(x = "Subject", y = "Number of trials")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(limits=c(0,24),breaks=seq(0,24,2))+
+  scale_fill_manual(values = wes_palette("Moonrise3"), name="Condition",breaks=c("1","2"),labels=c("AV", "VA"))+
+  scale_color_manual(values = wes_palette("Moonrise3"))+
+  guides(color=FALSE)+
+  theme(legend.position = "bottom")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+coo2 <- group_by(poo, subID, condition) %>%
+  summarise(
+    trialnum=min(TRIAL_INDEX,na.rm = TRUE)
+  )
+
+coo2 <- subset(coo2,trialnum < 12)
+
+length(which(coo2$condition==1)) #21 got AV
+
+length(which(coo2$condition==2)) #9 got VA
+```
+
+#how many times they actually saw stimuli
+```{r}
+looking <- subset(poo, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"|SAMPLE_MESSAGE=="LookingAtOmission")
+
+#count how many times they saw targets in each trial
+looking$count <- 1
+subs <- unique(looking$subID)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),targetcount=numeric())
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num)==1){
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],1)
+      moo <- rbind(moo,m)
+    } else {
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+        }
+      }
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],max(a$count))
+      moo <- rbind(moo,m)
+    }
+  }}
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "numtarg"
+
+#bar graph: for condition
+doo <- group_by(moo, subID, condition) %>%
+  summarise(
+    targseen=sum(numtarg,na.rm = TRUE)
+  )
+
+ggplot(doo,aes(x=factor(subID),y=targseen,color=factor(condition),fill=factor(condition)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(limits=c(0,50),breaks=seq(0,50,5))+
+  guides(color=FALSE)+
+  scale_fill_manual(values = wes_palette("Moonrise3"), name="Condition",breaks=c("1","2"),labels=c("AV", "VA"))+
+  scale_color_manual(values = wes_palette("Moonrise3"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  theme(legend.position = "bottom")
+
+#each trial is 10s long and audio and visual are both 1s each
+#max number is ~5 x per trial (5 * 24 = 120)
+foo <- group_by(moo, subID) %>%
+  summarise(
+    meanTarget=mean(numtarg,na.rm = TRUE),
+    seTarget=sd(numtarg, na.rm = TRUE)/sqrt(length(numtarg))
+  )
+
+limits <- aes(ymax = meanTarget + seTarget, ymin=meanTarget - seTarget)
+
+ggplot(foo,aes(x=factor(subID),y=meanTarget))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_y_continuous(limits=c(0,3),breaks=seq(0,3,1))
+
+############### bar graph: for trialtype ###############
+doo2 <- group_by(moo, subID, trialtype) %>% 
+  summarise(
+    targseen=sum(numtarg,na.rm = TRUE)
+  )
+
+ggplot(doo2,aes(x=factor(subID),y=targseen,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(limits=c(0,50),breaks=seq(0,50,5))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"),name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  theme(legend.position = "bottom")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+X and Y coordinate graph for both conditions and both trial types
+```{r}
+zoo <- group_by(poo.nosub19, subID, TRIAL_INDEX, condition, trialtype) %>%
+  summarise(
+    meanY=mean(RIGHT_GAZE_Y,na.rm = TRUE),
+    meanX=mean(RIGHT_GAZE_X,na.rm = TRUE)
+  )
+
+zoo$finaltrialtype[zoo$condition==1 & zoo$trialtype==1] <- 1
+zoo$finaltrialtype[zoo$condition==1 & zoo$trialtype==0] <- 2
+zoo$finaltrialtype[zoo$condition==2 & zoo$trialtype==1] <- 3
+zoo$finaltrialtype[zoo$condition==2 & zoo$trialtype==0] <- 4
+
+label <- c(`1` = "AV present",`2` = "AV omission",`3` = "VA present",`4` = "VA omission")
+
+ggplot(zoo,aes(x=meanX,y=meanY,color=factor(finaltrialtype),fill=factor(finaltrialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_point()+
+  labs(x = "X coordinate", y = "Y coordinate")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_x_continuous(limits=c(0,1280),breaks=seq(0,1280,300),position="top")+
+  scale_y_reverse(limits = c(1024, 0))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  facet_wrap(~finaltrialtype,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  theme(legend.position="none")
+```
+
+X and Y coordinate graph comparing condition AV with VA
+```{r}
+#condition 1: AV
+block1 <- subset(poo.nosub19,condition==1)
+
+doo <- group_by(block1, subID, TRIAL_INDEX) %>%
+  summarise(
+    meanY=mean(RIGHT_GAZE_Y,na.rm = TRUE),
+    meanX=mean(RIGHT_GAZE_X,na.rm = TRUE)
+  )
+
+ggplot(doo,aes(x=meanX,y=meanY,color=factor(subID),fill=factor(subID)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_point()+ggtitle("AV condition")+
+  labs(x = "X coordinate", y = "Y coordinate")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_x_continuous(limits=c(0,1280),breaks=seq(0,1280,300),position="top")+
+  scale_y_reverse(limits = c(1024, 0))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#condition 2: VA
+block2 <- subset(poo.nosub19,condition==2)
+doo2 <- group_by(block2, subID, TRIAL_INDEX) %>%
+  summarise(
+    meanY=mean(RIGHT_GAZE_Y,na.rm = TRUE),
+    meanX=mean(RIGHT_GAZE_X,na.rm = TRUE)
+  )
+
+ggplot(doo2,aes(x=meanX,y=meanY,color=factor(subID),fill=factor(subID)))+
+  theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_point()+ggtitle("VA condition")+
+  labs(x = "X coordinate", y = "Y coordinate")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_x_continuous(limits=c(0,1280),breaks=seq(0,1280,300),position="top")+
+  scale_y_reverse(limits = c(1024, 0))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+X and Y coordinate graph comparing trialtype omission with present
+```{r}
+#present trial
+present <- subset(poo.nosub19,trialtype==1)
+doo <- group_by(present, subID, TRIAL_INDEX) %>%
+  summarise(
+    meanY=mean(RIGHT_GAZE_Y, na.rm = TRUE),
+    meanX=mean(RIGHT_GAZE_X,na.rm = TRUE)
+  )
+
+ggplot(doo,aes(x=meanX,y=meanY,color=factor(subID),fill=factor(subID)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_point()+
+  ggtitle("Present trials")+
+  labs(x = "X coordinate", y = "Y coordinate")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_x_continuous(limits=c(0,1280),breaks=seq(0,1280,300),position="top")+
+  scale_y_reverse(limits = c(1024, 0))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#omission trial
+omission <- subset(poo.nosub19,trialtype==0)
+doo3 <- group_by(omission, subID, TRIAL_INDEX) %>%
+  summarise(
+    meanY=mean(RIGHT_GAZE_Y, na.rm = TRUE),
+    meanX=mean(RIGHT_GAZE_X,na.rm = TRUE)
+  )
+
+ggplot(doo3,aes(x=meanX,y=meanY,color=factor(subID),fill=factor(subID)))+
+  theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_point()+ggtitle("Omission trials")+
+  labs(x = "X coordinate", y = "Y coordinate")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_x_continuous(limits=c(0,1280),breaks=seq(0,1280,300),position="top")+
+  scale_y_reverse(limits = c(1024, 0))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+How many targets do babies usually see each trial?
+```{r}
+loo <- group_by(moo, subID, condition, trialtype) %>%
+  summarise(
+    meantarg=mean(numtarg,na.rm = TRUE)
+  )
+loo2 <- group_by(loo, condition, trialtype) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(loo2,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#RESULT: babies view targets the same number of times for the two different trial types and for the 2 conditions
+
+```
+
+PDR response (2 x 2: condition x trial type)
+Using entire trial duration
+```{r}
+#compare average pupil response for omission vs present
+goo3 <- group_by(poo.nosub19, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+goo4 <- group_by(goo3, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+    )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo4,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#removing learning trials
+foo <- subset(poo.nosub19, learningtrials == 0) #remove trials 1-3, 13-15
+
+#compare average pupil response for omission vs present
+goo <- group_by(foo, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+
+```
+
+PDR response (2 x 2: condition x trial type)
+Using only samples where babies are looking at target
+```{r}
+#computer screen is 1024 x 1280, 1/3 of 1280 = 
+#only keep samples where X coordinates are < 426 or > 852
+poo.target <- subset(poo.nosub19, RIGHT_GAZE_X < 1280/3 | RIGHT_GAZE_X > 1280/3*2)
+
+goo <- group_by(poo.target, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#removing learning trials
+foo <- subset(poo.target, learningtrials == 0) #remove trials 1-3, 13-15
+
+#compare average pupil response for omission vs present
+goo <- group_by(foo, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Look at changes across the trials: number of switches between the images
+```{r}
+looking <- subset(poo, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"|SAMPLE_MESSAGE=="LookingAtOmission")
+
+#count how many times they saw targets in each trial
+looking$count <- 1
+subs <- unique(looking$subID)
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num) > 1){
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+          looking$count[looking$subID==subs[j] & looking$TRIAL_INDEX==trials[i]] <- a$count
+        }}}}}
+
+TargCount <- subset(looking, select = c(1, 14,16,19,23,26,27,30,34:36))
+TargCount$Image[TargCount$SAMPLE_MESSAGE=="LookingAtTarget 1"] <- 1 
+TargCount$Image[TargCount$SAMPLE_MESSAGE=="LookingAtTarget 2"] <- 2
+TargCount$Image[TargCount$SAMPLE_MESSAGE=="LookingAtTarget 3"] <- 3 
+TargCount$Image[TargCount$SAMPLE_MESSAGE=="LookingAtTarget 4"] <- 4 
+TargCount$Image[TargCount$SAMPLE_MESSAGE=="LookingAtOmission"] <- 5 
+
+koo <- group_by(TargCount, subID, TRIAL_INDEX,TIMECODE,Image,trialtype) %>%
+  summarise(
+    condition=mean(condition,na.rm = TRUE)
+  )
+
+koo2 <- group_by(koo, subID,TRIAL_INDEX,trialtype,condition) %>%
+  summarise(
+    totaltargetviews = length(unique(TIMECODE,na.rm = TRUE)),
+    uniquetargetviews = length(unique(Image,na.rm = TRUE))
+  )
+
+koo2$switch <- koo2$uniquetargetviews
+
+z <- subset(koo2, uniquetargetviews==2)
+z <- subset(z, totaltargetviews > uniquetargetviews )
+koo2$switch[koo2$subID==10 & koo2$TRIAL_INDEX==11] <- 3
+koo2$switch[koo2$subID==21 & koo2$TRIAL_INDEX==13] <- 3
+koo2$switch[koo2$subID==21 & koo2$TRIAL_INDEX==14] <- 3
+koo2$switch[koo2$subID==24 & koo2$TRIAL_INDEX==4] <- 3
+
+koo2$switch2 <- koo2$switch - 1
+koo3 <- group_by(koo2, subID,trialtype,condition) %>%
+  summarise(
+    meanswitch=mean(switch2,na.rm = TRUE)
+  )
+
+koo4 <- group_by(koo3,trialtype,condition) %>%
+  summarise(
+    meanSWITCH=mean(meanswitch,na.rm = TRUE),
+    seSWITCH=sd(meanswitch, na.rm = TRUE)/sqrt(length(meanswitch))
+  )
+
+limits <- aes(ymax = meanSWITCH + seSWITCH, ymin=meanSWITCH - seSWITCH)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(koo4,aes(x=factor(trialtype),y=meanSWITCH,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Number of switches")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(limits=c(0,1),breaks=seq(0,1,0.5))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#RESULT: most of the time, babies just stare at one image/one location during the trial
+```
+
+Look at changes across the trials: duration of looking at images
+hypothesis: for omission trials maybe they stare at image location longer?
+
+Using only samples where babies are looking at target
+```{r}
+#computer screen is 1024 x 1280, 1/3 of 1280 = 
+#only keep samples where X coordinates are < 426 or > 852
+poo.target <- subset(poo.nosub19, RIGHT_GAZE_X < 1280/3 | RIGHT_GAZE_X > 1280/3*2)
+
+noo <- group_by(poo.nosub19,subID,TRIAL_INDEX,condition,trialtype) %>%
+  summarise(
+    totaltime=length(unique(TIMECODE,na.rm = TRUE))
+  )
+noo2 <- group_by(poo.target,subID,TRIAL_INDEX,condition,trialtype) %>%
+  summarise(
+    totaltime=length(unique(TIMECODE,na.rm = TRUE))
+  )
+
+noo$percentlooking <- 99
+subs <- unique(noo$subID)
+
+for (j in 1:length(subs)) {
+  trials <- unique(noo$TRIAL_INDEX[noo$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+  a <- noo2$totaltime[noo2$subID==subs[j] & noo2$TRIAL_INDEX==trials[i]]
+  b <- noo$totaltime[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] 
+  if (length(a) > 0) {
+  noo$percentlooking[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] <- a / b 
+  }}}
+
+noo3 <- subset(noo, percentlooking < 99 )
+noo4 <- group_by(noo3,condition,trialtype) %>%
+  summarise(
+    meanLOOKING=mean(percentlooking,na.rm = TRUE),
+    seLOOKING=sd(percentlooking, na.rm = TRUE)/sqrt(length(percentlooking))
+  )
+limits <- aes(ymax = meanLOOKING + seLOOKING, ymin=meanLOOKING - seLOOKING)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(noo4,aes(x=factor(trialtype),y=meanLOOKING,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.8),breaks=seq(0,.8,0.1))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+```
+
+
+Timecourse: look at first omission, first present after learning, first trial
+```{r}
+
+
+```
