@@ -1,0 +1,884 @@
+---
+title: "GCV2"
+author: "Felicia Zhang"
+date: '2017-05-10'
+output: html_document
+---
+
+```{r}
+library(ggplot2) 
+library(zoo)
+library(reshape)
+library(plyr)
+library(dplyr)
+library(scales) 
+library(data.table)
+library(signal)
+library(matrixStats)
+library(lme4)
+library(arm)
+library(broom)
+library(tidyr)
+library(wesanderson)
+
+#Import data
+raw <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_rawdata.rds")
+final <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_preprocessed_final.rds")
+
+#label learning trials 1-3, 13-15
+final$learningtrials <- 1
+final$learningtrials[final$TRIAL_INDEX > 15] <- 0
+final$learningtrials[final$TRIAL_INDEX > 3 & final$TRIAL_INDEX < 13] <- 0
+```
+
+Code if sample is looking to target or not
+```{r}
+raw$RIGHT_GAZE_X <- as.integer(raw$RIGHT_GAZE_X)
+
+#Subjects are looking but not at target
+raw$lookattarget <- 0
+
+#Subjects are looking at target if X coordinates are within 250-500 or 780-1030
+raw$lookattarget[raw$RIGHT_GAZE_X > 249 & raw$RIGHT_GAZE_X < 501] <- 1
+raw$lookattarget[raw$RIGHT_GAZE_X > 779 & raw$RIGHT_GAZE_X < 1031] <- 1
+
+#Subjects are looking off the computer screen, computer screen is 1024 x 1280
+raw$lookattarget[raw$RIGHT_GAZE_X < 0] <- 99
+raw$lookattarget[raw$RIGHT_GAZE_X > 1280] <- 99
+
+#No data collected
+raw$lookattarget[is.na(raw$RIGHT_GAZE_X)] <- 999
+
+#lookattarget 0 = screen, 1 = target, 99 = off the screen, 999 = no data
+
+raw$RIGHT_GAZE_X <- as.integer(raw$RIGHT_GAZE_X)
+######################################################################################################
+#Subjects are looking but not at target
+final$lookattarget <- 0
+
+#Subjects are looking at target if X coordinates are within 250-500 or 780-1030
+final$lookattarget[final$RIGHT_GAZE_X > 249 & final$RIGHT_GAZE_X < 501] <- 1
+final$lookattarget[final$RIGHT_GAZE_X > 779 & final$RIGHT_GAZE_X < 1031] <- 1
+
+#Subjects are looking off the computer screen, computer screen is 1024 x 1280
+final$lookattarget[final$RIGHT_GAZE_X < 0] <- 99
+final$lookattarget[final$RIGHT_GAZE_X > 1280] <- 99
+
+#lookattarget 0 = screen, 1 = target, 99 = off the screen
+```
+
+Count how many times subject sees target in a trial using raw DF
+```{r}
+#Remove baseline video from data analysis
+raw.novid <- subset(raw, TIMECODE < 10001)
+
+#Keep messages that indicate when subjects looked at target
+looking <- subset(raw.novid, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"| SAMPLE_MESSAGE=="LookingAtOmission")
+
+#Count how many times they saw targets in each trial, ignoring the trials where they saw 0 targets
+looking$count <- 1
+subs <- unique(looking$subID)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),targetcount=numeric())
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num)==1){
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],1)
+      moo <- rbind(moo,m)
+    } else {
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+        }
+      }
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],max(a$count))
+      moo <- rbind(moo,m)
+    }
+  }}
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "numtarg"
+
+#Fill in Targcount (contains all trials) with the info
+Targcount <- group_by(raw.novid,subID,TRIAL_INDEX,trialtype) %>%
+  summarise(
+    trialnum = unique(condition)
+  )
+
+Targcount$numtarg <- 0
+
+for (j in 1:length(moo$subID)) {
+  a <- moo$subID[j]
+  b <- moo$trialnum[j]
+  Targcount$numtarg[Targcount$subID==a & Targcount$TRIAL_INDEX==b] <- moo$numtarg[j]
+}
+
+#Fill main DF with info
+for (j in 1:length(Targcount$subID)) {
+  a <- Targcount$subID[j]
+  b <- Targcount$TRIAL_INDEX[j]
+  raw.novid$Targseen[raw.novid$subID==a & raw.novid$TRIAL_INDEX==b] <- Targcount$numtarg[j]
+  }
+```
+
+Count how many times subject sees target in a trial using final DF
+```{r}
+#Remove baseline video from data analysis
+final.novid <- subset(final, TIMECODE < 10001)
+
+#Keep messages that indicate when subjects looked at target
+looking <- subset(final.novid, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"| SAMPLE_MESSAGE=="LookingAtOmission")
+
+#Count how many times they saw targets in each trial, ignoring the trials where they saw 0 targets
+looking$count <- 1
+subs <- unique(looking$subID)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),targetcount=numeric())
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num)==1){
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],1)
+      moo <- rbind(moo,m)
+    } else {
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+        }
+      }
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],max(a$count))
+      moo <- rbind(moo,m)
+    }
+  }}
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "numtarg"
+
+#Fill in Targcount (contains all trials) with the info
+Final.Targcount <- group_by(final.novid,subID,TRIAL_INDEX,trialtype) %>%
+  summarise(
+    trialnum = unique(condition)
+  )
+
+Final.Targcount$numtarg <- 0
+
+for (j in 1:length(moo$subID)) {
+  a <- moo$subID[j]
+  b <- moo$trialnum[j]
+  Final.Targcount$numtarg[Final.Targcount$subID==a & Final.Targcount$TRIAL_INDEX==b] <- moo$numtarg[j]
+}
+
+#Fill main DF with info
+for (j in 1:length(Final.Targcount$subID)) {
+  a <- Final.Targcount$subID[j]
+  b <- Final.Targcount$TRIAL_INDEX[j]
+  final.novid$Targseen[final.novid$subID==a & final.novid$TRIAL_INDEX==b] <- Final.Targcount$numtarg[j]
+}
+
+```
+
+Plot: how many times subjects on average saw stimuli in a trial
+```{r}
+#each trial is 10s long and audio and visual are both 1s each
+#max number is ~5 x per trial (5 * 24 = 120)
+foo <- group_by(Final.Targcount, subID) %>%
+  summarise(
+    meanTarget=mean(numtarg,na.rm = TRUE),
+    seTarget=sd(numtarg, na.rm = TRUE)/sqrt(length(numtarg))
+  )
+
+limits <- aes(ymax = meanTarget + seTarget, ymin=meanTarget - seTarget)
+
+ggplot(foo,aes(x=factor(subID),y=meanTarget))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Plot: Percent of trials where babies do not see target vs trials they see target at least once
+```{r}
+#Number of trials where babies do not look at target
+foo <- subset(Targcount, numtarg==0)
+
+Notlooking <- group_by(foo,subID) %>%
+  summarise(
+    totalnumoftrials = length(unique(foo$TRIAL_INDEX))
+  )
+Notlooking$percent <- 0
+
+#Percent of trials where babies do not look at target: Divide number of trials where babies are not looking with total number of trials completed
+for (j in 1:length(Notlooking$percent)) {
+  a <- Notlooking$subID[j]
+  Notlooking$percent[Notlooking$subID==a] <- length(unique(foo$TRIAL_INDEX[foo$subID==a])) / Notlooking$totalnumoftrials[j]
+}
+Notlooking$looking <- 0
+
+#Calculate percent of trials where babies are looking (i.e. 1 - Notlooking$percent)
+Looking <- Notlooking
+Looking$percent <- 1 - Notlooking$percent
+Looking$looking <- 1
+
+#Combine DFs
+Lookingfinal <- rbind(Looking,Notlooking)
+
+#Plot
+ggplot(Lookingfinal,aes(x=factor(subID),y=percent,color=factor(looking),fill=factor(looking)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Percent of trials")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = wes_palette("Moonrise3"))+
+  scale_fill_manual(values = wes_palette("Moonrise3"),name="Trial type",breaks=c("0","1"),labels=c("0 looks to target", "Look to target at least once"))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)+
+  geom_hline(yintercept = mean(Lookingfinal$percent[Lookingfinal$looking==1]),size=1.5)
+
+mean(Lookingfinal$percent[Lookingfinal$looking==1]) #73%
+
+######################################################################################################
+#Number of trials where babies do not look at target
+foo <- subset(Final.Targcount, numtarg==0)
+
+Notlooking <- group_by(foo,subID) %>%
+  summarise(
+    totalnumoftrials = length(unique(foo$TRIAL_INDEX))
+  )
+Notlooking$percent <- 0
+
+#Percent of trials where babies do not look at target: Divide number of trials where babies are not looking with total number of trials completed
+for (j in 1:length(Notlooking$percent)) {
+  a <- Notlooking$subID[j]
+  Notlooking$percent[Notlooking$subID==a] <- length(unique(foo$TRIAL_INDEX[foo$subID==a])) / Notlooking$totalnumoftrials[j]
+}
+Notlooking$looking <- 0
+
+#Calculate percent of trials where babies are looking (i.e. 1 - Notlooking$percent)
+Looking <- Notlooking
+Looking$percent <- 1 - Notlooking$percent
+Looking$looking <- 1
+
+#Combine DFs
+Lookingfinal <- rbind(Looking,Notlooking)
+
+#Plot
+ggplot(Lookingfinal,aes(x=factor(subID),y=percent,color=factor(looking),fill=factor(looking)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Percent of trials")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = wes_palette("Moonrise3"))+
+  scale_fill_manual(values = wes_palette("Moonrise3"),name="Trial type",breaks=c("0","1"),labels=c("0 looks to target", "Look to target at least once"))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)+
+  geom_hline(yintercept = mean(Lookingfinal$percent[Lookingfinal$looking==1]),size=1.5)
+
+mean(Lookingfinal$percent[Lookingfinal$looking==1]) #57.2%
+```
+
+On average, what percentage of a trial did we remove for each subject?
+```{r}
+foo <- group_by(raw.novid, subID,TRIAL_INDEX) %>%
+  summarise(
+    totalsample = length(unique(TIMECODE))
+  )
+
+for (j in 1:length(foo$subID)) {
+  a <- foo$subID[j]
+  b <- foo$TRIAL_INDEX[j]
+  c <- length(unique(final.novid$TIMECODE[final.novid$subID==a & final.novid$TRIAL_INDEX==b]))
+  foo$percentremoved[j] <- c / foo$totalsample[j]
+}
+
+foo2 <- group_by(foo,subID) %>%
+  summarise(
+    meanPERCENT=mean(percentremoved,na.rm = TRUE),
+    sePERCENT=sd(percentremoved, na.rm = TRUE)/sqrt(length(percentremoved))
+  )
+
+limits <- aes(ymax = meanPERCENT + sePERCENT, ymin=meanPERCENT - sePERCENT)
+
+ggplot(foo2,aes(x=factor(subID),y=meanPERCENT))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  ggtitle("Percent of samples removed for a trial")+
+  labs(x = "Subject", y = "Percent")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)+
+  geom_errorbar(limits, width=0.25,color="black")+
+  geom_hline(yintercept = mean(foo2$meanPERCENT),color="coral",size=1.5)+
+  theme(plot.title = element_text(hjust = 0.5))
+
+mean(foo2$meanPERCENT)
+```
+
+Using raw DF
+For the trials where babies are looking at target, for each subject plot:
+1. Percentage looking at target 
+2. Percentage not looking at target
+      A. Percentage not looking on screen
+      B. Percentage looking on screen but not target
+```{r}
+#Only look at trials where babies seen Targ 
+rawlooking <- subset(raw.novid, Targseen > 0)
+
+#Calculate proportion of where they're looking for each trial
+#lookattarget 0 = screen, 1 = target, 99 = off the screen, 999 = no data
+rawlooking$target[rawlooking$lookattarget == 1] <- 1 
+rawlooking$offscreen[rawlooking$lookattarget == 99] <- 1 
+rawlooking$screen[rawlooking$lookattarget == 0] <- 1 
+rawlooking$nodata[rawlooking$lookattarget == 999] <- 1
+
+#replace NA with 0
+rawlooking$target[is.na(rawlooking$target)] <- 0
+rawlooking$offscreen[is.na(rawlooking$offscreen)] <- 0
+rawlooking$screen[is.na(rawlooking$screen)] <- 0
+rawlooking$nodata[is.na(rawlooking$nodata)] <- 0
+
+poo <- group_by(rawlooking, subID, TRIAL_INDEX) %>%
+  summarise(
+    percent.targ = sum(target) / sum(target + offscreen + screen + nodata),
+    percent.offscreen = sum(offscreen) / sum(target + offscreen + screen + nodata),
+    percent.screen = sum(screen) / sum(target + offscreen + screen + nodata),
+    percent.nodata = sum(nodata) / sum(target + offscreen + screen + nodata)
+  )
+
+#It should add up to 1
+poo$total <- poo$percent.targ + poo$percent.offscreen + poo$percent.screen + poo$percent.nodata
+
+#Get average for each subject  
+poo2 <- group_by(poo, subID) %>%
+  summarise(
+    percent.targ2 = mean(percent.targ),
+    percent.offscreen2 = mean(percent.offscreen),
+    percent.screen2 = mean(percent.screen),
+    percent.nodata2 = mean(percent.nodata)
+  )
+
+#Reshape wide to long
+poo3 <- gather(poo2, condition, percent, percent.targ2:percent.nodata2, factor_key=TRUE)
+
+#Plot
+ggplot(poo3,aes(x=factor(subID),y=percent,color=factor(condition),fill=factor(condition)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Percent of a trial")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = wes_palette("Royal1"))+
+  scale_fill_manual(values = wes_palette("Royal1"),name="Trial type", breaks=c("percent.targ2", "percent.offscreen2","percent.screen2","percent.nodata2"), labels=c("Looking at target","Off screen","On screen","No data"))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)
+```
+
+Using FINAL DF
+For the trials where babies are looking at target, for each subject plot:
+1. Percentage looking at target 
+2. Percentage not looking at target
+      A. Percentage not looking on screen
+      B. Percentage looking on screen but not target
+```{r}
+#Only look at trials where babies seen Targ 
+finallooking <- subset(final.novid, Targseen > 0)
+
+#Calculate proportion of where they're looking for each trial
+#lookattarget 0 = screen, 1 = target, 99 = off the screen, 999 = no data
+finallooking$target[finallooking$lookattarget == 1] <- 1 
+finallooking$offscreen[finallooking$lookattarget == 99] <- 1 
+finallooking$screen[finallooking$lookattarget == 0] <- 1 
+finallooking$nodata[finallooking$lookattarget == 999] <- 1
+
+#replace NA with 0
+finallooking$target[is.na(finallooking$target)] <- 0
+finallooking$offscreen[is.na(finallooking$offscreen)] <- 0
+finallooking$screen[is.na(finallooking$screen)] <- 0
+finallooking$nodata[is.na(finallooking$nodata)] <- 0
+
+poo <- group_by(finallooking, subID, TRIAL_INDEX) %>%
+  summarise(
+    percent.targ = sum(target) / sum(target + offscreen + screen + nodata),
+    percent.offscreen = sum(offscreen) / sum(target + offscreen + screen + nodata),
+    percent.screen = sum(screen) / sum(target + offscreen + screen + nodata),
+    percent.nodata = sum(nodata) / sum(target + offscreen + screen + nodata)
+  )
+
+#It should add up to 1
+poo$total <- poo$percent.targ + poo$percent.offscreen + poo$percent.screen + poo$percent.nodata
+
+#Get average for each subject  
+poo2 <- group_by(poo, subID) %>%
+  summarise(
+    percent.targ2 = mean(percent.targ),
+    percent.offscreen2 = mean(percent.offscreen),
+    percent.screen2 = mean(percent.screen),
+    percent.nodata2 = mean(percent.nodata)
+  )
+
+#Reshape wide to long
+poo3 <- gather(poo2, condition, percent, percent.targ2:percent.nodata2, factor_key=TRUE)
+
+#Plot
+ggplot(poo3,aes(x=factor(subID),y=percent,color=factor(condition),fill=factor(condition)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Percent of a trial")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = wes_palette("Royal1"))+
+  scale_fill_manual(values = wes_palette("Royal1"),name="Trial type", breaks=c("percent.targ2","percent.screen2"), labels=c("Looking at target","On screen"))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)
+```
+
+Using raw DF
+For the trials where babies are NOT looking at target, for each subject plot:
+1. Percentage not looking at target
+      A. Percentage not looking on screen
+      B. Percentage looking on screen but not target
+```{r}
+#Only look at trials where babies DONT seen Targ 
+raw.notlooking <- subset(raw.novid, Targseen == 0)
+
+#Calculate proportion of where they're looking for each trial
+#lookattarget 0 = screen, 1 = target, 99 = off the screen, 999 = no data
+raw.notlooking$offscreen[raw.notlooking$lookattarget == 99] <- 1 
+raw.notlooking$screen[raw.notlooking$lookattarget == 0] <- 1 
+raw.notlooking$nodata[raw.notlooking$lookattarget == 999] <- 1
+
+#replace NA with 0
+raw.notlooking$offscreen[is.na(raw.notlooking$offscreen)] <- 0
+raw.notlooking$screen[is.na(raw.notlooking$screen)] <- 0
+raw.notlooking$nodata[is.na(raw.notlooking$nodata)] <- 0
+
+roo <- group_by(raw.notlooking, subID, TRIAL_INDEX) %>%
+  summarise(
+    percent.offscreen = sum(offscreen) / sum(offscreen + screen + nodata),
+    percent.screen = sum(screen) / sum(offscreen + screen + nodata),
+    percent.nodata = sum(nodata) / sum(offscreen + screen + nodata)
+  )
+
+#It should add up to 1
+roo$total <- roo$percent.offscreen + roo$percent.screen + roo$percent.nodata
+
+#Get average for each subject  
+roo2 <- group_by(roo, subID) %>%
+  summarise(
+    percent.targ2 = 0,
+    percent.offscreen2 = mean(percent.offscreen),
+    percent.screen2 = mean(percent.screen),
+    percent.nodata2 = mean(percent.nodata)
+  )
+
+#Reshape wide to long
+roo3 <- gather(roo2, condition, percent, percent.targ2:percent.nodata2, factor_key=TRUE)
+
+#Plot
+ggplot(roo3,aes(x=factor(subID),y=percent,color=factor(condition),fill=factor(condition)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  labs(x = "Subject", y = "Percent of a trial")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = wes_palette("Royal1"))+
+  scale_fill_manual(values = wes_palette("Royal1"),name="Trial type", breaks=c("percent.offscreen2","percent.screen2", "percent.nodata2"), labels=c("Off screen","On screen", "No data"))+
+  theme(legend.position = "bottom")+
+  guides(color=FALSE)
+```
+
+Using FINAL DF
+After removing bad samples, on average the time babies spend looking at the screen per trial
+```{r}
+boo <- group_by(final.novid, subID, TRIAL_INDEX) %>%
+  summarise(
+    triallength = length(unique(TIMECODE))*4
+  )
+
+boo2 <- group_by(boo, subID) %>%
+  summarise(
+    meanLENGTH=mean(triallength,na.rm = TRUE),
+    seLENGTH=sd(triallength, na.rm = TRUE)/sqrt(length(triallength))
+  )
+
+limits <- aes(ymax = meanLENGTH + seLENGTH, ymin=meanLENGTH - seLENGTH)
+
+#Plot
+ggplot(boo2,aes(x=factor(subID),y=meanLENGTH))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  ggtitle("Looking on screen")+
+  labs(x = "Subject", y = "Time (ms)")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  scale_y_continuous(limits=c(0,9000),breaks=seq(0,9000,1000))+
+  geom_hline(yintercept = mean(boo2$meanLENGTH),color="coral",size=1.5)
+```
+
+Using FINAL DF
+After removing bad samples, on average the time babies spend looking at the target per trial
+```{r}
+boo <- group_by(final.novid, subID, TRIAL_INDEX,lookattarget) %>%
+  summarise(
+    triallength = length(unique(TIMECODE))*4
+  )
+
+#only want duration of when babies look at target
+boo <- subset(boo, lookattarget==1)
+
+boo2 <- group_by(boo, subID) %>%
+  summarise(
+    meanLENGTH=mean(triallength,na.rm = TRUE),
+    seLENGTH=sd(triallength, na.rm = TRUE)/sqrt(length(triallength))
+  )
+
+limits <- aes(ymax = meanLENGTH + seLENGTH, ymin=meanLENGTH - seLENGTH)
+
+#Plot
+ggplot(boo2,aes(x=factor(subID),y=meanLENGTH))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  geom_bar(stat="identity")+
+  ggtitle("Looking at target")+
+  labs(x = "Subject", y = "Time (ms)")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=14),axis.text.y  = element_text(size=14))+
+  theme(legend.text=element_text(size=14),legend.title=element_text(size=14))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  scale_y_continuous(limits=c(0,7000),breaks=seq(0,7000,1000))+
+  geom_hline(yintercept = mean(boo2$meanLENGTH),color="coral",size=1.5)
+```
+
+PDR response (2 x 2: condition x trial type)
+excluding sub 19
+including learning trials
+```{r}
+#remove video
+poo <- subset(final, TIMECODE < 10001)
+
+#keep everyone but sub 19
+poo2 <- subset(poo, subID !=19)
+
+#compare average pupil response for omission vs present
+goo <- group_by(poo2, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+```
+
+PDR response (2 x 2: condition x trial type)
+remove familiarzation trials
+```{r}
+#remove video
+poo <- subset(final, TIMECODE < 10001)
+
+#keep everyone but sub 19
+poo2 <- subset(poo, subID !=19)
+
+#remove familiarzation trials
+poo3 <- subset(poo2, learningtrials==0)
+
+#compare average pupil response for omission vs present
+goo <- group_by(poo3, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+```
+
+PDR response (2 x 2: condition x trial type)
+Using samples where babies ARE looking at target
+```{r}
+#remove video
+poo <- subset(final, TIMECODE < 10001)
+
+#keep everyone but sub 19
+poo2 <- subset(poo, subID !=19)
+
+#remove familiarzation trials
+poo3 <- subset(poo2, learningtrials==0)
+
+#keep samples where babies are LOOKING at target
+poo4 <- subset(poo3, lookattarget==1)
+
+#compare average pupil response for omission vs present
+goo <- group_by(poo4, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+```
+
+PDR response (2 x 2: condition x trial type)
+Using samples where babies ARE NOT looking at target
+```{r}
+#remove video
+poo <- subset(final, TIMECODE < 10001)
+
+#keep everyone but sub 19
+poo2 <- subset(poo, subID !=19)
+
+#remove familiarzation trials
+poo3 <- subset(poo2, learningtrials==0)
+
+#keep samples where babies are NOT LOOKING at target
+poo4 <- subset(poo3, lookattarget==0)
+
+#compare average pupil response for omission vs present
+goo <- group_by(poo4, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+```
+
+How many targets do babies usually see each trial?
+including trials where babies see 0
+```{r}
+loo <- group_by(final.novid, subID, condition, trialtype) %>%
+  summarise(
+    meantarg=mean(Targseen,na.rm = TRUE)
+  )
+
+loo2 <- group_by(loo, condition, trialtype) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(loo2,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#RESULT: babies view targets the same number of times for the two different trial types and for the 2 conditions
+
+#2 x 2 ANOVA
+loo$subID <- as.factor(loo$subID)
+loo$condition <- as.factor(loo$condition)
+loo$trialtype <- as.factor(loo$trialtype)
+
+res.aov3 <- aov(meantarg ~ condition*trialtype + Error(subID/(condition*trialtype)), data=loo)
+summary(res.aov3)
+
+```
+
+```{r}
+
+```

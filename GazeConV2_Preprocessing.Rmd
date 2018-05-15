@@ -282,6 +282,7 @@ ggplot(poo4,aes(x=factor(subID),y=100-percentmissing.sub))+
 write.csv(poo, "GazeConV2_preprocessed_all.csv", row.names=TRUE) #save to computer
 write.csv(poo4, "GazeConV2_preprocessed_final.csv", row.names=TRUE) #save to computer
 
+saveRDS(poo, "GazeConV2_rawdata.rds")
 saveRDS(poo, "GazeConV2_preprocessed_all.rds")
 saveRDS(poo4, "GazeConV2_preprocessed_final.rds")
 ```

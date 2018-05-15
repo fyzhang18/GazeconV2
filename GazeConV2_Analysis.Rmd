@@ -392,7 +392,6 @@ ggplot(loo2,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=fact
   scale_fill_manual(values = wes_palette("GrandBudapest"))
 
 #RESULT: babies view targets the same number of times for the two different trial types and for the 2 conditions
-
 ```
 
 PDR response (2 x 2: condition x trial type)
@@ -467,15 +466,20 @@ ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=f
   scale_fill_manual(values = wes_palette("GrandBudapest"))
 
 #2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
 
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
 ```
 
 PDR response (2 x 2: condition x trial type)
 Using only samples where babies are looking at target
 ```{r}
-#computer screen is 1024 x 1280, 1/3 of 1280 = 
-#only keep samples where X coordinates are < 426 or > 852
-poo.target <- subset(poo.nosub19, RIGHT_GAZE_X < 1280/3 | RIGHT_GAZE_X > 1280/3*2)
+#computer screen is 1024 x 1280
+#only keep samples where X coordinates are within 250-500 or 780-1030
+poo.target <- subset(poo.nosub19, RIGHT_GAZE_X > 249 & RIGHT_GAZE_X < 501 | RIGHT_GAZE_X > 779 & RIGHT_GAZE_X < 1031)
 
 goo <- group_by(poo.target, subID, condition, trialtype) %>%
   summarise(
@@ -546,6 +550,86 @@ ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=f
   scale_color_manual(values = wes_palette("GrandBudapest"))+
   scale_fill_manual(values = wes_palette("GrandBudapest"))
 
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+```
+
+Percent looking at target
+Using only samples where babies are looking at target
+```{r}
+#computer screen is 1024 x 1280, 1/3 of 1280 = 
+#only keep samples where X coordinates are < 426 or > 852
+poo.target <- subset(poo.nosub19, RIGHT_GAZE_X < 1280/3 | RIGHT_GAZE_X > 1280/3*2)
+
+noo <- group_by(poo.nosub19,subID,TRIAL_INDEX,condition,trialtype) %>%
+  summarise(
+    totaltime=length(unique(TIMECODE,na.rm = TRUE))
+  )
+noo2 <- group_by(poo.target,subID,TRIAL_INDEX,condition,trialtype) %>%
+  summarise(
+    totaltime=length(unique(TIMECODE,na.rm = TRUE))
+  )
+
+noo$percentlooking <- 99
+subs <- unique(noo$subID)
+
+for (j in 1:length(subs)) {
+  trials <- unique(noo$TRIAL_INDEX[noo$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+  a <- noo2$totaltime[noo2$subID==subs[j] & noo2$TRIAL_INDEX==trials[i]]
+  b <- noo$totaltime[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] 
+  if (length(a) > 0) {
+  noo$percentlooking[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] <- a / b 
+  }}}
+
+#remove bad trials
+noo3 <- subset(noo, percentlooking < 99 ) 
+
+noo4 <- group_by(noo3,subID,condition,trialtype) %>%
+  summarise(
+    percentlooking2=mean(percentlooking,na.rm = TRUE)
+  )
+
+noo5 <- group_by(noo4,condition,trialtype) %>%
+  summarise(
+    meanLOOKING=mean(percentlooking2,na.rm = TRUE),
+    seLOOKING=sd(percentlooking2, na.rm = TRUE)/sqrt(length(percentlooking2))
+  )
+
+limits <- aes(ymax = meanLOOKING + seLOOKING, ymin=meanLOOKING - seLOOKING)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(noo5,aes(x=factor(trialtype),y=meanLOOKING,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.8),breaks=seq(0,.8,0.1))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+noo4$subID <- as.factor(noo4$subID)
+noo4$condition <- as.factor(noo4$condition)
+noo4$trialtype <- as.factor(noo4$trialtype)
+
+res.aov3 <- aov(percentlooking2 ~ condition*trialtype + Error(subID/(condition*trialtype)), data=noo4)
+summary(res.aov3)
 ```
 
 Look at changes across the trials: number of switches between the images
@@ -599,7 +683,8 @@ koo2$switch[koo2$subID==21 & koo2$TRIAL_INDEX==14] <- 3
 koo2$switch[koo2$subID==24 & koo2$TRIAL_INDEX==4] <- 3
 
 koo2$switch2 <- koo2$switch - 1
-koo3 <- group_by(koo2, subID,trialtype,condition) %>%
+
+koo3 <- group_by(koo2,subID,trialtype,condition) %>%
   summarise(
     meanswitch=mean(switch2,na.rm = TRUE)
   )
@@ -632,67 +717,11 @@ ggplot(koo4,aes(x=factor(trialtype),y=meanSWITCH,color=factor(trialtype),fill=fa
   scale_fill_manual(values = wes_palette("GrandBudapest"))
 
 #RESULT: most of the time, babies just stare at one image/one location during the trial
+
+#one sample t-test for AV present compared to 0
+res.t <- t.test(koo3$meanswitch[koo3$trialtype==1 & koo3$condition==1], mu=0, alternative="greater")
+tidy(res.t)
 ```
-
-Look at changes across the trials: duration of looking at images
-hypothesis: for omission trials maybe they stare at image location longer?
-
-Using only samples where babies are looking at target
-```{r}
-#computer screen is 1024 x 1280, 1/3 of 1280 = 
-#only keep samples where X coordinates are < 426 or > 852
-poo.target <- subset(poo.nosub19, RIGHT_GAZE_X < 1280/3 | RIGHT_GAZE_X > 1280/3*2)
-
-noo <- group_by(poo.nosub19,subID,TRIAL_INDEX,condition,trialtype) %>%
-  summarise(
-    totaltime=length(unique(TIMECODE,na.rm = TRUE))
-  )
-noo2 <- group_by(poo.target,subID,TRIAL_INDEX,condition,trialtype) %>%
-  summarise(
-    totaltime=length(unique(TIMECODE,na.rm = TRUE))
-  )
-
-noo$percentlooking <- 99
-subs <- unique(noo$subID)
-
-for (j in 1:length(subs)) {
-  trials <- unique(noo$TRIAL_INDEX[noo$subID==subs[j]])
-  print(subs[j])
-  for (i in 1:length(trials)) {
-  a <- noo2$totaltime[noo2$subID==subs[j] & noo2$TRIAL_INDEX==trials[i]]
-  b <- noo$totaltime[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] 
-  if (length(a) > 0) {
-  noo$percentlooking[noo$subID==subs[j] & noo$TRIAL_INDEX==trials[i]] <- a / b 
-  }}}
-
-noo3 <- subset(noo, percentlooking < 99 )
-noo4 <- group_by(noo3,condition,trialtype) %>%
-  summarise(
-    meanLOOKING=mean(percentlooking,na.rm = TRUE),
-    seLOOKING=sd(percentlooking, na.rm = TRUE)/sqrt(length(percentlooking))
-  )
-limits <- aes(ymax = meanLOOKING + seLOOKING, ymin=meanLOOKING - seLOOKING)
-label <- c(`1` = "AV",`2` = "VA")
-
-ggplot(noo4,aes(x=factor(trialtype),y=meanLOOKING,color=factor(trialtype),fill=factor(trialtype)))+
-  theme_bw()+
-  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
-  geom_bar(stat = "identity")+
-  labs(x = "Trial type", y = "Percent looking at target")+
-  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
-  theme(axis.title = element_text(face="bold", size=20))+ 
-  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
-  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
-  geom_errorbar(limits, width=0.25,color="black")+
-  theme(legend.position="none")+
-  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
-  theme(strip.text = element_text(size=16))+
-  scale_y_continuous(labels=percent,limits=c(0,.8),breaks=seq(0,.8,0.1))+
-  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
-  scale_color_manual(values = wes_palette("GrandBudapest"))+
-  scale_fill_manual(values = wes_palette("GrandBudapest"))
-```
-
 
 Timecourse: look at first omission, first present after learning, first trial
 ```{r}
