@@ -1,0 +1,575 @@
+---
+title: "GCV2"
+author: "Felicia Zhang"
+date: '2017-05-10'
+output: html_document
+---
+
+```{r}
+library(ggplot2) 
+library(zoo)
+library(reshape)
+library(plyr)
+library(dplyr)
+library(scales) 
+library(data.table)
+library(signal)
+library(matrixStats)
+library(lme4)
+library(arm)
+library(broom)
+library(tidyr)
+library(wesanderson)
+
+#Import data
+raw <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_rawdata.rds")
+final <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_preprocessed_final.rds")
+
+#label learning trials 1-3, 13-15, 1=learning trial
+final$learningtrials <- 1
+final$learningtrials[final$TRIAL_INDEX > 15] <- 0
+final$learningtrials[final$TRIAL_INDEX > 3 & final$TRIAL_INDEX < 13] <- 0
+
+#remove sub 19
+raw <- subset(raw, subID !=19)
+final <- subset(final, subID !=19)
+```
+
+Code if sample is looking to target or not
+```{r}
+#Subjects are looking but not at target
+final$lookattarget <- 0
+
+#Subjects are looking at target if X coordinates are within 250-500 or 780-1030
+final$lookattarget[final$RIGHT_GAZE_X > 249 & final$RIGHT_GAZE_X < 501] <- 1
+final$lookattarget[final$RIGHT_GAZE_X > 779 & final$RIGHT_GAZE_X < 1031] <- 1
+
+#Subjects are looking off the computer screen, computer screen is 1024 x 1280
+final$lookattarget[final$RIGHT_GAZE_X < 0] <- 99
+final$lookattarget[final$RIGHT_GAZE_X > 1280] <- 99
+
+#lookattarget 0 = screen, 1 = target, 99 = off the screen
+```
+
+Count how many times subject sees target in a trial using final DF
+```{r}
+#Remove baseline video from data analysis
+final.novid <- subset(final, TIMECODE < 10001)
+
+#Keep messages that indicate when subjects looked at target
+looking <- subset(final.novid, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"| SAMPLE_MESSAGE=="LookingAtOmission")
+
+#Count how many times they saw targets in each trial, ignoring the trials where they saw 0 targets
+looking$count <- 1
+subs <- unique(looking$subID)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),targetcount=numeric())
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num)==1){
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],1)
+      moo <- rbind(moo,m)
+    } else {
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+        }
+      }
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],max(a$count))
+      moo <- rbind(moo,m)
+    }
+  }}
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "numtarg"
+
+#Fill in Targcount (contains all trials) with the info
+Final.Targcount <- group_by(final.novid,subID,TRIAL_INDEX,trialtype) %>%
+  summarise(
+    trialnum = unique(condition)
+  )
+
+Final.Targcount$numtarg <- 0
+
+for (j in 1:length(moo$subID)) {
+  a <- moo$subID[j]
+  b <- moo$trialnum[j]
+  Final.Targcount$numtarg[Final.Targcount$subID==a & Final.Targcount$TRIAL_INDEX==b] <- moo$numtarg[j]
+}
+
+#Fill main DF with info
+for (j in 1:length(Final.Targcount$subID)) {
+  a <- Final.Targcount$subID[j]
+  b <- Final.Targcount$TRIAL_INDEX[j]
+  final.novid$Targseen[final.novid$subID==a & final.novid$TRIAL_INDEX==b] <- Final.Targcount$numtarg[j]
+}
+
+```
+
+Fill in Order: Order 1 - AV, then VA, and 2 is VA, then AV
+``` {r}
+poo <- group_by(final.novid, subID, TRIAL_INDEX) %>%
+  summarise(
+    Condition = unique(condition)
+  )
+
+#keep only the first few trials for each subject
+poo <- poo[!duplicated(poo$subID),]
+
+#if the condition is 1, it means order 1 etc.
+poo$order <- 1
+poo$order[poo$Condition==2] <- 2
+
+#now fill in for main DF
+for (j in 1:length(poo$subID)) {
+  a <- poo$subID[j]
+  b <- poo$order[j]
+  final.novid$order[final.novid$subID==a] <- b
+}
+```
+
+Plot: how many times in total do they see AV target, omission, VA target, omission (individual, average)
+```{r}
+poo <- group_by(final.novid, TRIAL_INDEX, subID, trialtype, condition) %>%
+  summarise(
+    Targseen = unique(Targseen)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    TotalTargseen = sum(Targseen)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanTOTAL = mean(TotalTargseen),
+    seTOTAL=sd(TotalTargseen, na.rm = TRUE)/sqrt(length(TotalTargseen))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Total number of times seen")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,10),breaks=seq(0,10,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#for AV - every subject
+pooAV <- subset(poo2, condition==1)
+
+ggplot(pooAV,aes(x=factor(subID),y=TotalTargseen,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity",position = position_dodge(width = 0.9))+
+  labs(x = "Subject", y = "Total number of times seen")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  scale_y_continuous(limits=c(0,25),breaks=seq(0,25,2))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"),name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  guides(color=FALSE)
+
+#VA condition - every subject
+pooAV <- subset(poo2, condition==2)
+
+ggplot(pooAV,aes(x=factor(subID),y=TotalTargseen,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity",position = position_dodge(width = 0.9))+
+  labs(x = "Subject", y = "Total number of times seen")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  scale_y_continuous(limits=c(0,25),breaks=seq(0,25,2))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"),name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  guides(color=FALSE)
+```
+
+### ORDER EFFECTS 
+
+Plot: how many times in total do they see AV target, omission, VA target, omission (individual, average) 
+```{r}
+poo <- group_by(final.novid, TRIAL_INDEX, subID, trialtype, condition, order) %>%
+  summarise(
+    Targseen = unique(Targseen)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition,order) %>%
+  summarise(
+    TotalTargseen = sum(Targseen)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition,order) %>%
+  summarise(
+    meanTOTAL = mean(TotalTargseen),
+    seTOTAL=sd(TotalTargseen, na.rm = TRUE)/sqrt(length(TotalTargseen))
+  )
+
+# order 1 = AV, VA
+pooAV <- subset(poo3, order ==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(pooAV,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Total Number of times seen")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,10),breaks=seq(0,10,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+# order 2 = VA, AV
+pooVA <- subset(poo3, order ==2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(pooVA,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Total Number of times seen")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,10),breaks=seq(0,10,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Plot: Order effects - pupil change from baseline, excluding samples where babies are NOT looking at the target
+```{r}
+# excluding samples where babies are NOT looking at the target
+goo <- subset(final.novid, lookattarget==1)
+
+#remove learning trials
+goo <- subset(goo, learningtrials==0)
+
+# calculate PDR for each subject
+goo2 <- group_by(goo, subID, trialtype, condition, order) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+# collapse across subjects
+goo3 <- group_by(goo2, condition, trialtype, order) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+# order 1 = AV, VA
+gooAV <- subset(goo3, order==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("AV-VA")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# order 2 = VA, AV
+gooAV <- subset(goo3, order==2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("VA-AV")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Plot: Order effects - pupil change from baseline, including samples where babies are NOT looking at the target
+```{r}
+#remove learning trials
+goo <- subset(final.novid, learningtrials==0)
+
+# calculate PDR for each subject
+goo2 <- group_by(goo, subID, trialtype, condition, order) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+# collapse across subjects
+goo3 <- group_by(goo2, condition, trialtype, order) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+# order 1 = AV, VA
+gooAV <- subset(goo3, order==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("AV-VA")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# order 2 = VA, AV
+gooAV <- subset(goo3, order==2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("VA-AV")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Plot: Order effects - times viewed target in one trial excluding trials where they are not looking
+```{r}
+#exclude trials where they are not looking
+poo <- subset(final.novid, Targseen > 0)
+
+loo <- group_by(poo, subID, condition, trialtype, order) %>%
+  summarise(
+    meantarg=mean(Targseen,na.rm = TRUE)
+  )
+
+loo2 <- group_by(loo, condition, trialtype, order) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+# order 1 = AV, VA
+gooAV <- subset(loo2, order==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("AV-VA")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))
+
+# order 2 = VA, AV
+gooAV <- subset(loo2, order==2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("VA-AV")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))
+
+```
+
+Plot: Order effects - times viewed target in one trial including trials where they are not looking
+```{r}
+loo <- group_by(final.novid, subID, condition, trialtype, order) %>%
+  summarise(
+    meantarg=mean(Targseen,na.rm = TRUE)
+  )
+
+loo2 <- group_by(loo, condition, trialtype, order) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+# order 1 = AV, VA
+gooAV <- subset(loo2, order==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("AV-VA")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))
+
+# order 2 = VA, AV
+gooAV <- subset(loo2, order==2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+ggplot(gooAV,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("VA-AV")+
+  labs(x = "Trial type", y = "Times viewed target")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_y_continuous(limits=c(0,2),breaks=seq(0,2,0.5))
+
+```
+
+Plot: Order effects - percent looking at target excluding trials where they are not looking
+```{r}
+loo <- group_by(final.novid, subID, condition, trialtype, order) %>%
+  summarise(
+    meantarg=mean(Targseen,na.rm = TRUE)
+  )
+
+loo2 <- group_by(loo, condition, trialtype, order) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+# order 1 = AV, VA
+gooAV <- subset(loo2, order==1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+```

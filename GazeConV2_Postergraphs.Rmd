@@ -1,0 +1,298 @@
+---
+title: "ICIS/BCBL GAZECON GRAPHS"
+author: "Felicia Zhang"
+date: '2017-05-10'
+output: html_document
+---
+
+```{r}
+library(ggplot2) 
+library(zoo)
+library(reshape)
+library(plyr)
+library(dplyr)
+library(scales) 
+library(data.table)
+library(signal)
+library(matrixStats)
+library(lme4)
+library(arm)
+library(broom)
+library(tidyr)
+library(wesanderson)
+
+#Import data
+final <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_preprocessed_final.rds")
+
+#label learning trials 1-3, 13-15
+final$learningtrials <- 1
+final$learningtrials[final$TRIAL_INDEX > 15] <- 0
+final$learningtrials[final$TRIAL_INDEX > 3 & final$TRIAL_INDEX < 13] <- 0
+```
+
+Code if sample is looking to target or not
+```{r}
+#Subjects are looking but not at target
+final$lookattarget <- 0
+
+#Subjects are looking at target if X coordinates are within 250-500 or 780-1030
+final$lookattarget[final$RIGHT_GAZE_X > 249 & final$RIGHT_GAZE_X < 501] <- 1
+final$lookattarget[final$RIGHT_GAZE_X > 779 & final$RIGHT_GAZE_X < 1031] <- 1
+
+#Subjects are looking off the computer screen, computer screen is 1024 x 1280
+final$lookattarget[final$RIGHT_GAZE_X < 0] <- 99
+final$lookattarget[final$RIGHT_GAZE_X > 1280] <- 99
+
+#lookattarget 0 = screen, 1 = target, 99 = off the screen
+```
+
+Count how many times subject sees target in a trial using final DF
+```{r}
+#Remove baseline video from data analysis
+final.novid <- subset(final, TIMECODE < 10001)
+
+#Keep messages that indicate when subjects looked at target
+looking <- subset(final.novid, SAMPLE_MESSAGE=="LookingAtTarget 1" | SAMPLE_MESSAGE=="LookingAtTarget 2" | SAMPLE_MESSAGE=="LookingAtTarget 3" | SAMPLE_MESSAGE=="LookingAtTarget 3"| SAMPLE_MESSAGE=="LookingAtOmission")
+
+#Count how many times they saw targets in each trial, ignoring the trials where they saw 0 targets
+looking$count <- 1
+subs <- unique(looking$subID)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),targetcount=numeric())
+
+for (j in 1:length(subs)) {
+  trials <- unique(looking$TRIAL_INDEX[looking$subID==subs[j]])
+  print(subs[j])
+  for (i in 1:length(trials)) {
+    a <- subset(looking, subID==subs[j] & TRIAL_INDEX==trials[i])
+    num <- a$count
+    if (length(num)==1){
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],1)
+      moo <- rbind(moo,m)
+    } else {
+      for (k in 2:length(num)) {
+        diffintime <- a$TIMECODE[k] - a$TIMECODE[k-1]
+        #if the difference between these 2 messages is over 2000ms apart, it means they're separate
+        if (diffintime > 2000) {
+          a$count[k] <- k  
+        }
+      }
+      m <- c(subs[j],trials[i],a$trialtype[1],a$condition[1],max(a$count))
+      moo <- rbind(moo,m)
+    }
+  }}
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "numtarg"
+
+#Fill in Targcount (contains all trials) with the info
+Final.Targcount <- group_by(final.novid,subID,TRIAL_INDEX,trialtype) %>%
+  summarise(
+    trialnum = unique(condition)
+  )
+
+Final.Targcount$numtarg <- 0
+
+for (j in 1:length(moo$subID)) {
+  a <- moo$subID[j]
+  b <- moo$trialnum[j]
+  Final.Targcount$numtarg[Final.Targcount$subID==a & Final.Targcount$TRIAL_INDEX==b] <- moo$numtarg[j]
+}
+
+#Fill main DF with info
+for (j in 1:length(Final.Targcount$subID)) {
+  a <- Final.Targcount$subID[j]
+  b <- Final.Targcount$TRIAL_INDEX[j]
+  final.novid$Targseen[final.novid$subID==a & final.novid$TRIAL_INDEX==b] <- Final.Targcount$numtarg[j]
+}
+```
+
+PDR response (2 x 2: condition x trial type)
+excluding sub 19
+excluding learning trials
+```{r}
+#remove video
+poo <- subset(final, TIMECODE < 10001)
+
+#keep everyone but sub 19
+poo2 <- subset(poo, subID !=19)
+
+#remove familiarzation trials
+poo3 <- subset(poo2, learningtrials==0)
+
+#compare average pupil response for omission vs present
+goo <- group_by(poo3, subID, condition, trialtype) %>%
+  summarise(
+    meanPUPIL=mean(PUPIL_CORRECTED,na.rm = TRUE)
+  )
+
+goo2 <- group_by(goo, condition, trialtype) %>%
+  summarise(
+    meanPUPILSs=mean(meanPUPIL,na.rm = TRUE),
+    sePUPIL=sd(meanPUPIL, na.rm = TRUE)/sqrt(length(meanPUPIL))
+  )
+
+limits <- aes(ymax = meanPUPILSs + sePUPIL, ymin=meanPUPILSs - sePUPIL)
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(goo2,aes(x=factor(trialtype),y=meanPUPILSs,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(labels=percent,limits=c(0,.2),breaks=seq(0,.2,0.05))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+goo$subID <- as.factor(goo$subID)
+goo$condition <- as.factor(goo$condition)
+goo$trialtype <- as.factor(goo$trialtype)
+
+res.aov3 <- aov(meanPUPIL ~ condition*trialtype + Error(subID/(condition*trialtype)), data=goo)
+summary(res.aov3)
+
+# condition is sig (p = 0.00386 **), 
+# trialtype is sig (p=0.0204 *), 
+# interaction is not significant (p=0.162)
+```
+
+How many targets do babies usually see each trial?
+excluding sub 19
+excluding learning trials
+NOT INCLUDED IN POSTER
+```{r}
+#keep everyone but sub 19
+foo <- subset(final.novid, subID !=19)
+
+#remove familiarzation trials
+foo2 <- subset(foo, learningtrials==0)
+
+loo <- group_by(foo2, subID, condition, trialtype,TRIAL_INDEX) %>%
+  summarise(
+    Targseen=mean(Targseen,na.rm = TRUE)
+  )
+
+loo2 <- group_by(loo, subID, condition, trialtype) %>%
+  summarise(
+    meantarg=mean(Targseen,na.rm = TRUE)
+  )
+
+loo3 <- group_by(loo2, condition, trialtype) %>%
+  summarise(
+    meanTARG=mean(meantarg,na.rm = TRUE),
+    seTARG=sd(meantarg, na.rm = TRUE)/sqrt(length(meantarg))
+  )
+
+limits <- aes(ymax = meanTARG + seTARG, ymin=meanTARG - seTARG)
+
+label <- c(`1` = "AV",`2` = "VA")
+
+ggplot(loo3,aes(x=factor(trialtype),y=meanTARG,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Times viewed target for a trial")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  theme(legend.position="none")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_y_continuous(limits=c(0,1.5),breaks=seq(0,1.5,0.5))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#RESULT: babies view targets the same number of times for the two different trial types and for the 2 conditions
+
+#2 x 2 ANOVA
+loo2$subID <- as.factor(loo2$subID)
+loo2$condition <- as.factor(loo2$condition)
+loo2$trialtype <- as.factor(loo2$trialtype)
+
+res.aov3 <- aov(meantarg ~ condition*trialtype + Error(subID/(condition*trialtype)), data=loo2)
+summary(res.aov3)
+
+# condition is not sig (p = 0.931), 
+# trialtype is significant (p=0.0461 *), 
+# interaction is significant (p=0.0386 *)
+```
+
+Plot: how many times in total do they see AV target, omission, VA target, omission (individual, average)
+excluding sub 19
+excluding learning trials
+```{r}
+#keep everyone but sub 19
+foo <- subset(final.novid, subID !=19)
+
+#remove familiarzation trials
+foo2 <- subset(foo, learningtrials==0)
+
+poo <- group_by(foo2, TRIAL_INDEX, subID, trialtype, condition) %>%
+  summarise(
+    Targseen = unique(Targseen)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    TotalTargseen = sum(Targseen)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanTOTAL = mean(TotalTargseen),
+    seTOTAL=sd(TotalTargseen, na.rm = TRUE)/sqrt(length(TotalTargseen))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Times viewed target for entire experiment")+
+  theme(plot.title = element_text(face="bold", size=20, hjust=0))+
+  theme(axis.title = element_text(face="bold", size=20))+ 
+  theme(axis.text.x  = element_text(size=20),axis.text.y  = element_text(size=20))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,7),breaks=seq(0,7,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+poo2$subID <- as.factor(poo2$subID)
+poo2$condition <- as.factor(poo2$condition)
+poo2$trialtype <- as.factor(poo2$trialtype)
+
+res.aov3 <- aov(TotalTargseen ~ condition*trialtype + Error(subID/(condition*trialtype)), data=poo2)
+summary(res.aov3)
+
+# condition is not sig (p = 0.497), 
+# trialtype is significant (p= 7.37e-09 ***), 
+# interaction is significant (p=0.0396 *)
+```
+
+
+```{r}
+
+```

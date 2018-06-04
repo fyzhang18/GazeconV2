@@ -349,7 +349,6 @@ ggplot(foo2,aes(x=factor(subID),y=meanPERCENT))+
   guides(color=FALSE)+
   geom_errorbar(limits, width=0.25,color="black")+
   geom_hline(yintercept = mean(foo2$meanPERCENT),color="coral",size=1.5)+
-  theme(plot.title = element_text(hjust = 0.5))
 
 mean(foo2$meanPERCENT)
 ```
