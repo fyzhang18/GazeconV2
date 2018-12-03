@@ -1,0 +1,1284 @@
+---
+title: "GCV2"
+author: "Felicia Zhang"
+date: '2017-05-10'
+output: html_document
+---
+
+```{r}
+library(ggplot2) 
+library(zoo)
+library(reshape)
+library(plyr)
+library(dplyr)
+library(scales) 
+library(data.table)
+library(signal)
+library(matrixStats)
+library(lme4)
+library(arm)
+library(broom)
+library(tidyr)
+library(wesanderson)
+library(car)
+library(lmerTest)
+
+#Import data
+raw2 <- readRDS("/Volumes/emberson-1/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_filtered.rds")
+
+#FILTERED MEANS
+#1. remove bad subjects (subjects with > 50% of data missing and did not look at omission trial for each block)
+#2. remove bad trials (trials with >50% of data missing and pupil average > 2.5 SD of subject mean pupil average)
+ 
+```
+Condition
+1 = AV 
+2 = VA 
+
+Counterbalance
+1 = AV -> VA 
+2 = VA -> AV
+
+Trialtype
+1 = present
+0 = omission
+
+Code fixation to target using 150ms as a fixation
+```{r}
+#only need to do this once
+
+# count number of consecutive looks
+raw2$targetcount <- sequence(rle(raw2$lookattarget)$lengths)
+
+# calculate diff column so we know when a look starts and stops
+raw2$diff <- c(diff(raw2$targetcount),-raw2$targetcount[length(raw2$RECORDING_SESSION_LABEL)])
+
+# must look at target
+looking <- subset(raw2, lookattarget==1)
+
+# length of looking has to be > 150ms and keeping targetcount==1 for the start of each look
+looking <- subset(looking, diff < -38 | targetcount ==1) #38*4 = 150ms, so it's a long enough fixation
+
+# the end of each fixation
+z <- which(looking$diff !=1)
+
+moo <- data.frame(subID=numeric(),trialnum=numeric(),trialtype=numeric(),condition=numeric(),starttime=numeric(), endtime=numeric())
+
+for (j in 1:length(z)) {
+add <- c(looking$subID[z[j]],looking$TRIAL_INDEX[z[j]],looking$trialtype[z[j]],looking$condition[z[j]],looking$TIMECODE[z[j]-1],looking$TIMECODE[z[j]])
+moo <- rbind(moo, add)
+}
+
+names(moo)[1] <- "subID"
+names(moo)[2] <- "trialnum"
+names(moo)[3] <- "trialtype"
+names(moo)[4] <- "condition"
+names(moo)[5] <- "starttime"
+names(moo)[6] <- "endtime"
+
+moo$lengthlook <- moo$endtime - moo$starttime
+
+#only want looks that are longer than 150ms
+moo <- subset(moo, lengthlook > 37)
+
+# calculate diff column so we know how much time has passed since each look
+moo$diff <- c(0,diff(moo$starttime))
+
+# replace negative diff with 0, indicates start of new trial
+moo$diff[moo$diff < 0] <- 0
+
+moo$targetnum <- 1
+moo$targetnum[moo$lengthlook > 4000] <- 2
+moo$targetnum[moo$lengthlook > 6000] <- 3
+moo$targetnum[moo$lengthlook > 8000] <- 4
+
+
+lookstotarget <- subset(moo, diff > 2000 | diff==0)
+
+# only care about lengthoflook > 2000 bc that means they watched the entire association
+# lookstotarget2000 <- subset(moo, lengthlook > 2000)
+# 
+# # fill in main DF
+# raw2$fixationtotarget2000 <- 0
+# 
+# for (i in 1:length(lookstotarget2000$subID)) {
+#   start <- which(raw2$subID==lookstotarget2000$subID[i] & raw2$TRIAL_INDEX==lookstotarget2000$trialnum[i] & raw2$TIMECODE==lookstotarget2000$starttime[i])
+#   end <- which(raw2$subID==lookstotarget2000$subID[i] & raw2$TRIAL_INDEX==lookstotarget2000$trialnum[i] & raw2$TIMECODE==lookstotarget2000$endtime[i])
+#   raw2$fixationtotarget2000[start:end] <- 1
+# }
+# 
+# # fill in main DF
+# raw2$fixationtotarget <- 0
+# 
+# for (i in 1:length(lookstotarget$subID)) {
+#   start <- which(raw2$subID==lookstotarget$subID[i] & raw2$TRIAL_INDEX==lookstotarget$trialnum[i] & raw2$TIMECODE==lookstotarget$starttime[i])
+#   end <- which(raw2$subID==lookstotarget$subID[i] & raw2$TRIAL_INDEX==lookstotarget$trialnum[i] & raw2$TIMECODE==lookstotarget$endtime[i])
+#   raw2$fixationtotarget[start:end] <- 1
+# }
+# 
+# saveRDS(raw2, "GazeConV2_Sept21.rds")
+# write.csv(raw2, "GazeConV2_Sept21.csv", row.names=TRUE) #save to computer
+```
+
+Code fixation to target using 100ms as a fixation
+```{r}
+###only need to do this once
+# 
+# #### fixationtotarget coding #### 
+# 
+# # count number of consecutive looks
+# raw2$targetcount <- sequence(rle(raw2$lookattarget)$lengths)
+# 
+# # calculate diff column so we know when a look starts and stops
+# raw2$diff <- c(diff(raw2$targetcount),-raw2$targetcount[length(raw2$RECORDING_SESSION_LABEL)])
+# 
+# # make sure look is longer than 100ms
+# raw2$fixationtotarget <- 1
+# 
+# rownum_lookstart <- which(raw2$targetcount==1) #where each look starts
+# 
+# for (i in 8365:length(rownum_lookstart)){
+#   if (i==length(rownum_lookstart)) { #it's the last look
+#     lengthoflook <- raw2$diff[length(raw2$subID)] #the last row of the DF
+#     if (lengthoflook > -25) { #shorter than 100ms, remove it
+#       raw2$fixationtotarget[(rownum_lookstart[i]):(length(raw2$subID))] <- 0
+#     }
+#   } else {
+#     rownum_end <- rownum_lookstart[i+1] - 1 #row num when look ends
+#     lengthoflook <- raw2$diff[rownum_end] #length of look
+#     if (lengthoflook > -25) { #shorter than 100ms, remove it
+#       raw2$fixationtotarget[(rownum_lookstart[i]):(rownum_lookstart[i+1] - 1)] <- 0
+#     }
+#   }
+# }
+# 
+# # only care about lengthoflook > 2000 bc that means they watched the entire association
+# 
+# # make sure look is longer than 100ms
+# raw2$fixationtotarget2000 <- 1
+# 
+# rownum_lookstart <- which(raw2$targetcount==1) #where each look starts
+# 
+# for (i in 8100:length(rownum_lookstart)){
+#   if (i==length(rownum_lookstart)) { #it's the last look
+#     lengthoflook <- raw2$diff[length(raw2$subID)] #the last row of the DF
+#     if (lengthoflook > -500) { #shorter than 2000ms, remove it
+#       raw2$fixationtotarget2000[(rownum_lookstart[i]):length(raw2$subID)] <- 0
+#     }
+#   } else {
+#     rownum_end <- rownum_lookstart[i+1] - 1 #row num when look ends
+#     lengthoflook <- raw2$diff[rownum_end] #length of look
+#     if (lengthoflook > -500) { #shorter than 2000ms, remove it
+#       raw2$fixationtotarget2000[(rownum_lookstart[i]):(rownum_lookstart[i+1] - 1)] <- 0
+#     }
+#   }
+# }
+# 
+# saveRDS(raw2, "GazeConV2_Nov12.rds")
+# write.csv(raw2, "GazeConV2_Nov12.csv", row.names=TRUE) #save to computer
+```
+
+```{r}
+#Import data
+raw2 <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_Sept21_150msfixations.rds")
+#raw2 <- readRDS("/Volumes/emberson/ResearchProjects/Pupillometry/GazeConV2/Data/Experiment2/GazeConV2_Nov12_100msfixations.rds")
+```
+
+Number of omission and present trials
+```{r}
+poo <- group_by(raw2, subID, condition, trialtype) %>%
+  summarise(
+    numtrials = length(unique(TRIAL_INDEX))
+  )
+
+# ONLY AV 
+foo <- subset(poo, condition ==1)
+
+foo$numtrials[foo$trialtype==0] <- foo$numtrials[foo$trialtype==0]*-1
+
+ggplot(foo, aes(x = factor(subID), y = numtrials, fill = factor(trialtype)))+
+  theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity", width = .6)+
+  ggtitle("AV")+
+  labs(x = "Subject ID", y = "Number of trials")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  scale_y_continuous(breaks = seq(-10,10,1),labels=abs(seq(-10,10,1)))+ 
+  coord_flip()+
+  theme(legend.position="top")+
+  scale_fill_discrete(name="Trial type",breaks=c("0","1"),labels=c("omission", "present"))
+
+# ONLY VA 
+foo <- subset(poo, condition ==2)
+
+foo$numtrials[foo$trialtype==0] <- foo$numtrials[foo$trialtype==0]*-1
+
+ggplot(foo, aes(x = factor(subID), y = numtrials, fill = factor(trialtype)))+
+  theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity", width = .6)+
+  ggtitle("VA")+
+  labs(x = "Subject ID", y = "Number of trials")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  scale_y_continuous(breaks = seq(-10,10,1),labels=abs(seq(-10,10,1)))+ 
+  coord_flip()+
+  theme(legend.position="top")+
+  scale_fill_discrete(name="Trial type",breaks=c("0","1"),labels=c("omission", "present"))
+```
+
+Plot: average number of trials for each
+```{r}
+poo2 <- group_by(raw2, subID, trialtype, condition) %>%
+  summarise(
+    numtrials = length(unique(TRIAL_INDEX))
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanTRIALS = mean(numtrials),
+    seTRIALS=sd(numtrials, na.rm = TRUE)/sqrt(length(numtrials))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTRIALS + seTRIALS, ymin=meanTRIALS - seTRIALS)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanTRIALS,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Number of trials")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,8),breaks=seq(0,8,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+```
+
+Plot: how many times they see AV target, omission, VA target, omission for entire experiment
+```{r}
+poo2 <- group_by(lookstotarget, subID, trialtype, condition) %>%
+  summarise(
+    TotalTargseen = sum(targetnum)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanTOTAL = mean(TotalTargseen),
+    seTOTAL=sd(TotalTargseen, na.rm = TRUE)/sqrt(length(TotalTargseen))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("Fixate on target (experiment)")+
+  labs(x = "Trial type", y = "Count")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,16),breaks=seq(0,16,2))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+```
+
+Plot: how many times they look at target, omission, VA target, omission for 1 trial
+```{r}
+poo <- group_by(lookstotarget, subID, trialnum, trialtype, condition) %>%
+  summarise(
+    TotalTargseen = sum(targetnum, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    TotalTargseen2 = mean(TotalTargseen, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanTOTAL = mean(TotalTargseen2, na.rm = TRUE),
+    seTOTAL=sd(TotalTargseen2, na.rm = TRUE)/sqrt(length(TotalTargseen2))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanTOTAL + seTOTAL, ymin=meanTOTAL - seTOTAL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanTOTAL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("Fixate on target (trial)")+
+  labs(x = "Trial type", y = "Count")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,3),breaks=seq(0,3,1))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+```
+
+Number of subjects in each counterbalance condition
+```{r}
+poo <- group_by(raw2, counterbalance) %>%
+  summarise(
+    numsubs = length(unique(subID))
+  )
+
+ggplot(poo,aes(x=factor(counterbalance),y=numsubs,color=factor(counterbalance),fill=factor(counterbalance)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  geom_bar(stat = "identity")+
+  ggtitle("Number of subjects for analysis")+
+  labs(x = "Counterbalance", y = "Number of subjects")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(limits=c(0,16),breaks=seq(0,16,2))+
+  scale_x_discrete(name="Counterbalance",breaks=c("1","2"),labels=c("AV/VA", "VA/AV"))
+```
+
+PUPIL CHANGE
+With familiarzation trials
+```{r}
+poo <- group_by(raw2, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("All trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+# Two within variables
+# condition = within
+# trial type = within
+
+poo2$subID <- as.factor(poo2$subID)
+poo2$condition <- as.factor(poo2$condition)
+poo2$trialtype <- as.factor(poo2$trialtype)
+
+res.aov1 <- aov(meanpupil2 ~ condition*trialtype + Error(subID/(condition*trialtype)), data=poo2)
+summary(res.aov1)
+
+```
+
+Without familiarzation trials
+```{r}
+#don't care about familiarzation trials
+goo <- subset(raw2, learningtrials ==0)
+
+poo <- group_by(goo, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+# Two within variables
+# condition = within
+# trial type = within
+
+# remove subID == 1, 26, bc we don't have enough observations for them
+poo2 <- subset(poo2, subID != 1)
+poo2 <- subset(poo2, subID != 26)
+
+poo2$subID <- as.factor(poo2$subID)
+poo2$condition <- as.factor(poo2$condition)
+poo2$trialtype <- as.factor(poo2$trialtype)
+
+res.aov2 <- aov(meanpupil2 ~ condition*trialtype + Error(subID/(condition*trialtype)), data=poo2)
+summary(res.aov2)
+
+```
+
+Without familiarzation trials and looking at target (more liberal, includes looking at target that are not a fixation so could just be babies moving around) (when fixations to target ==0 or ==1)
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+poo <- group_by(goo2, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+# Two within variables
+# condition = within
+# trial type = within
+
+# remove subID == 1, 26, bc we don't have enough observations for them
+# n = 24
+poo3 <- subset(poo2, subID != 1)
+poo3 <- subset(poo3, subID != 26)
+
+poo3$subID <- as.factor(poo3$subID)
+poo3$condition <- as.factor(poo3$condition)
+poo3$trialtype <- as.factor(poo3$trialtype)
+
+res.aov3 <- aov(meanpupil2 ~ condition*trialtype + Error(subID/(condition*trialtype)), data=poo3)
+summary(res.aov3)
+
+# MIXED MODELLING
+poo2$subID <- as.factor(poo2$subID)
+poo2$condition <- as.factor(poo2$condition)
+poo2$trialtype <- as.factor(poo2$trialtype)
+
+poo3 <- subset(poo2, subID != 1)
+poo3 <- subset(poo3, subID != 26)
+
+MM1 = lmer(meanpupil2 ~ condition*trialtype + (1|subID), data=poo3)
+summary(MM1)
+
+```
+
+Without familiarzation trials and looking at target (more conservative, REMOVES looking at target that are not a fixation so could just be babies moving around (when fixations to target ==1))
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# ONLY WANT FIXATIONS TO TARGET
+goo3 <- subset(goo2, fixationtotarget ==1)
+
+poo <- group_by(goo3, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + FIXATIONS to target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Without familiarzation trials and ONLY LOOKS (when fixations to target ==0 )
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# ONLY WANT FIXATIONS TO TARGET
+goo3 <- subset(goo2, fixationtotarget ==0)
+
+poo <- group_by(goo3, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + ONLY LOOKS")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+
+Break up pupil change by counterbalancing order
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+poo <- group_by(goo2, subID, TRIAL_INDEX, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot counterbalance order 1
+poo4 <- subset(poo3, counterbalance == 1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+# plot counterbalance order 2
+poo4 <- subset(poo3, counterbalance == 2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Without familiarzation trials and looking at target (more liberal, includes looking at target that are not a fixation so could just be babies moving around) (pupil average is up until 8000ms)
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# only want up until 8000ms
+goo2 <- subset(goo2, TIMECODE < 8001)
+
+poo <- group_by(goo2, subID, TRIAL_INDEX, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo3,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+#2 x 2 ANOVA
+# Two within variables
+# condition = within
+# trial type = within
+
+# remove subID == 1, 26, bc we don't have enough observations for them
+# n = 24
+poo3 <- subset(poo2, subID != 1)
+poo3 <- subset(poo3, subID != 26)
+
+poo3$subID <- as.factor(poo3$subID)
+poo3$condition <- as.factor(poo3$condition)
+poo3$trialtype <- as.factor(poo3$trialtype)
+
+res.aov3 <- aov(meanpupil2 ~ condition*trialtype + Error(subID/(condition*trialtype)), data=poo3)
+summary(res.aov3)
+
+# MIXED MODELLING
+poo2$subID <- as.factor(poo2$subID)
+poo2$condition <- as.factor(poo2$condition)
+poo2$trialtype <- as.factor(poo2$trialtype)
+
+MM1 = lmer(meanpupil2 ~ condition*trialtype + (1|subID), data=poo2)
+summary(MM1)
+
+```
+
+Break up pupil change by counterbalancing order (pupil average is up until 8000ms)
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# only want up until 8000ms
+goo2 <- subset(goo2, TIMECODE < 8001)
+
+poo <- group_by(goo2, subID, TRIAL_INDEX, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil2 = mean(meanpupil, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil2, na.rm = TRUE),
+    sePUPIL=sd(meanpupil2, na.rm = TRUE)/sqrt(length(meanpupil2))
+  )
+
+# plot counterbalance order 1
+poo4 <- subset(poo3, counterbalance == 1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+# plot counterbalance order 2
+poo4 <- subset(poo3, counterbalance == 2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanPUPIL + sePUPIL, ymin=meanPUPIL - sePUPIL)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target ")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,.16),breaks=seq(0,.16,.02))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Plot looking at screen by counterbalancing order
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+poo <- group_by(goo, subID, TRIAL_INDEX, trialtype, condition,counterbalance) %>%
+  summarise(
+    missingdata = unique(percentmissing, na.rm = TRUE)
+  )
+poo$lookingatscreen <- 1- poo$missingdata
+
+poo2 <- group_by(poo, subID, trialtype, condition,counterbalance) %>%
+  summarise(
+    looking = mean(lookingatscreen, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanLooking = mean(looking, na.rm = TRUE),
+    seLooking=sd(looking, na.rm = TRUE)/sqrt(length(looking))
+  )
+
+# plot counterbalance order 1
+poo4 <- subset(poo3, counterbalance == 1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanLooking + seLooking, ymin=meanLooking - seLooking)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanLooking,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at screen")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+# plot counterbalance order 2
+poo4 <- subset(poo3, counterbalance == 2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanLooking + seLooking, ymin=meanLooking - seLooking)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanLooking,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at screen")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Plot looking at target by counterbalancing order
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+poo <- group_by(goo, subID, TRIAL_INDEX, trialtype, condition,counterbalance) %>%
+  summarise(
+    lookingattarget = length(which(lookattarget==1))/n()
+  )
+
+poo2 <- group_by(poo, subID, trialtype, condition,counterbalance) %>%
+  summarise(
+    looking = mean(lookingattarget, na.rm = TRUE)
+  )
+
+poo3 <- group_by(poo2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanLooking = mean(looking, na.rm = TRUE),
+    seLooking=sd(looking, na.rm = TRUE)/sqrt(length(looking))
+  )
+
+# plot counterbalance order 1
+poo4 <- subset(poo3, counterbalance == 1)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanLooking + seLooking, ymin=meanLooking - seLooking)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanLooking,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at target")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+# plot counterbalance order 2
+poo4 <- subset(poo3, counterbalance == 2)
+label <- c(`1` = "AV",`2` = "VA")
+limits <- aes(ymax = meanLooking + seLooking, ymin=meanLooking - seLooking)
+
+ggplot(poo4,aes(x=factor(trialtype),y=meanLooking,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials")+
+  geom_bar(stat = "identity")+
+  labs(x = "Trial type", y = "Percent looking at target")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="none")+
+  scale_y_continuous(labels=percent,limits=c(0,1),breaks=seq(0,1,.2))+
+  geom_errorbar(limits, width=0.25,color="black")+
+  facet_wrap(~condition,ncol=2,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))+
+  scale_x_discrete(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(values = wes_palette("GrandBudapest"))
+
+```
+
+Pupil timecourse for entire trial
+```{r}
+# don't want familiarization trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# 
+poo <- group_by(goo2, subID, TIMECODE, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, TIMECODE, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil, na.rm = TRUE),
+    sePUPIL=sd(meanpupil, na.rm = TRUE)/sqrt(length(meanpupil))
+  )
+
+# plot time course
+ggplot(poo2,aes(x=TIMECODE,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("No familiarzation trials + must look at target")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.1,.3),breaks=seq(-.1,.3,.05))+
+  scale_x_continuous(limits=c(0,10000),breaks=seq(0,10000,1000))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+```
+
+Pupil timecourse for entire trial (broken up by counterbalancing order)
+```{r}
+# don't want learning trials
+goo <- subset(raw2, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# 
+poo <- group_by(goo2, subID, TIMECODE, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, TIMECODE, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil, na.rm = TRUE),
+    sePUPIL=sd(meanpupil, na.rm = TRUE)/sqrt(length(meanpupil))
+  )
+
+label <- c(`1` = "AV",`2` = "VA")
+
+# plot time course counterbalance == 1
+poo3 <- subset(poo2, counterbalance==1)
+
+ggplot(poo3,aes(x=TIMECODE,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("CB order AV/VA")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.2,.4),breaks=seq(-.2,.4,.1))+
+  scale_x_continuous(limits=c(0,10000),breaks=seq(0,10000,1000))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+
+# plot time course counterbalance == 2
+poo3 <- subset(poo2, counterbalance==2)
+
+ggplot(poo3,aes(x=TIMECODE,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("CB order VA/AV")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.1,.3),breaks=seq(-.1,.3,.05))+
+  scale_x_continuous(limits=c(0,10000),breaks=seq(0,10000,1000))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+```
+
+Pupil timecourse from first look to target
+```{r}
+raw3 <- raw2
+
+raw3$keep <- 0
+
+for (i in 1:length(lookstotarget$subID)) {
+  sub <- lookstotarget$subID[i]
+  t <- lookstotarget$trialnum[i]
+  start <- lookstotarget$starttime[i]
+  stop <- lookstotarget$endtime[i]
+  z <- which(raw3$subID==sub & raw3$TRIAL_INDEX==t & raw3$TIMECODE==start)
+  zz <- which(raw3$subID==sub & raw3$TRIAL_INDEX==t & raw3$TIMECODE==stop)
+  raw3$keep[z:zz] <- 1
+}
+
+raw4 <- subset(raw3, keep == 1)
+
+#recode time so that for each look the timecode starts at 0
+u <- unique(raw4$targetcount)
+
+raw4$TIMECODE2 <- 0
+
+for (i in 2:length(u)) {
+  raw4$TIMECODE2[raw4$targetcount==u[i]] <- (u[i]-1)*4
+}
+
+# don't want learning trials
+goo <- subset(raw4, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# 
+poo <- group_by(goo2, subID, TIMECODE2, trialtype, condition) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, TIMECODE2, trialtype, condition) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil, na.rm = TRUE),
+    sePUPIL=sd(meanpupil, na.rm = TRUE)/sqrt(length(meanpupil))
+  )
+
+# plot 
+ggplot(poo2,aes(x=TIMECODE2,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("Time-locked pupil response (No familiarzation trials+looking at target)")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.2,.3),breaks=seq(-.2,.3,.1))+
+  scale_x_continuous(limits=c(0,3000),breaks=seq(0,3000,500))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+
+```
+
+Pupil timecourse from first look to target (broken up by counterbalancing order)
+```{r}
+# don't want learning trials
+goo <- subset(raw4, learningtrials != 1)
+
+# don't want samples where babies are not loking at target
+goo2 <- subset(goo, lookattarget != 0)
+
+# 
+poo <- group_by(goo2, subID, TIMECODE2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanpupil = mean(PUPIL_CORRECTED, na.rm = TRUE)
+  )
+
+poo2 <- group_by(poo, TIMECODE2, trialtype, condition,counterbalance) %>%
+  summarise(
+    meanPUPIL = mean(meanpupil, na.rm = TRUE),
+    sePUPIL=sd(meanpupil, na.rm = TRUE)/sqrt(length(meanpupil))
+  )
+
+# plot 
+poo3 <- subset(poo2, counterbalance==1)
+
+ggplot(poo3,aes(x=TIMECODE2,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("CB order AV/VA")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.4,.4),breaks=seq(-.4,.4,.1))+
+  scale_x_continuous(limits=c(0,3000),breaks=seq(0,3000,500))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+
+# plot 
+poo3 <- subset(poo2, counterbalance==2)
+
+ggplot(poo3,aes(x=TIMECODE2,y=meanPUPIL,color=factor(trialtype),fill=factor(trialtype)))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.line = element_line(colour = "black"))+
+  ggtitle("CB order VA/AV")+
+  geom_line()+
+  labs(x = "Time (ms)", y = "Pupil change from baseline")+
+  theme(plot.title = element_text(face="bold", size=16, hjust=0.5))+
+  theme(axis.title = element_text(face="bold", size=16))+ 
+  theme(axis.text.x  = element_text(size=16),axis.text.y  = element_text(size=16))+
+  theme(legend.text=element_text(size=16),legend.title=element_text(size=16))+
+  theme(legend.position="top")+
+  scale_y_continuous(labels=percent,limits=c(-.2,.3),breaks=seq(-.2,.3,.1))+
+  scale_x_continuous(limits=c(0,3000),breaks=seq(0,3000,500))+
+  scale_color_manual(values = wes_palette("GrandBudapest"))+
+  scale_fill_manual(name="Trial type",breaks=c("0","1"),labels=c("Omission", "Present"),values = wes_palette("GrandBudapest"))+
+  guides(color=FALSE)+
+  geom_ribbon(aes(ymin=meanPUPIL-sePUPIL,ymax=meanPUPIL+sePUPIL),alpha=0.5)+
+  facet_wrap(~condition,ncol=1,labeller = as_labeller(label))+
+  theme(strip.text = element_text(size=16))
+```
